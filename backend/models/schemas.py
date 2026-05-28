@@ -35,6 +35,7 @@ class QueryResponse(BaseModel):
     confidence_score: float = Field(ge=0.0, le=1.0)
     insufficient_evidence: bool = False
     sources_searched: List[str] = Field(default_factory=lambda: ["PubMed"])
+    confidence_label: Optional[str] = None
 
 
 class SearchPapersRequest(BaseModel):

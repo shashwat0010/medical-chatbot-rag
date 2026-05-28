@@ -12,6 +12,7 @@ from app.logging_config import setup_logging
 from app.routes import health, query, search
 
 setup_logging()
+# Force uvicorn reload to load updated environment settings
 settings = get_settings()
 
 

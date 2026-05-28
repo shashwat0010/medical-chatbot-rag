@@ -1,8 +1,7 @@
 import logging
 
 from fastapi import APIRouter, HTTPException, Request
-from groq import RateLimitError as GroqRateLimitError, AuthenticationError as GroqAuthenticationError
-from openai import APIConnectionError, AuthenticationError as OpenAIAuthenticationError, RateLimitError as OpenAIRateLimitError
+import httpx
 
 from app.config import get_settings
 from app.limiter import limiter
@@ -27,7 +26,7 @@ def get_pipeline() -> RAGPipeline:
 
 def _llm_quota_message() -> str:
     return (
-        "LLM API quota exceeded. Please check your Groq or OpenAI billing status. "
+        "LLM API quota exceeded. Please check your Mistral billing status. "
         "You can also set USE_LOCAL_EMBEDDINGS=true in backend/.env to use free local search."
     )
 
@@ -39,10 +38,10 @@ async def query_medical_research(
     body: QueryRequest,
 ) -> QueryResponse:
     settings = get_settings()
-    if not settings.groq_api_key:
+    if not settings.mistral_api_key:
         raise HTTPException(
             status_code=503,
-            detail="Groq API key is not configured. Set GROQ_API_KEY in the environment.",
+            detail="Mistral API key is not configured. Set MISTRAL_API_KEY in the environment.",
         )
 
     safety = check_query_safety(body.query, settings.block_emergency_keywords)
@@ -54,25 +53,26 @@ async def query_medical_research(
     logger.info("Query from %s: %s", request.client.host if request.client else "unknown", body.query[:100])
 
     try:
-        result = await get_pipeline().run(body.query, max_papers=body.max_papers)
+        result = await get_pipeline().run(body.query, max_papers=body.max_papers, risk_level=safety.risk_level)
         if not result.confidence_note.startswith("Low confidence"):
             result.confidence_note = f"{result.confidence_note} {DISCLAIMER}"
         return result
     except OpenAIQuotaError as exc:
         raise HTTPException(status_code=402, detail=str(exc)) from exc
-    except (OpenAIRateLimitError, GroqRateLimitError) as exc:
-        if "quota" in str(exc).lower():
-            raise HTTPException(status_code=402, detail=_llm_quota_message()) from exc
-        raise HTTPException(
-            status_code=429,
-            detail="API rate limit reached. Please wait a moment and try again.",
-        ) from exc
-    except (OpenAIAuthenticationError, GroqAuthenticationError) as exc:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid API key. Check your configuration in backend/.env",
-        ) from exc
-    except (EmbeddingServiceError, APIConnectionError) as exc:
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        if status == 429:
+            raise HTTPException(
+                status_code=429,
+                detail="API rate limit reached. Please wait a moment and try again.",
+            ) from exc
+        if status == 401:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid Mistral API key. Check MISTRAL_API_KEY in backend/.env",
+            ) from exc
+        raise HTTPException(status_code=502, detail="LLM API Error") from exc
+    except (EmbeddingServiceError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except ValueError as exc:
         logger.exception("Configuration error during query")

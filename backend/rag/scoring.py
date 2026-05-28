@@ -30,6 +30,9 @@ def compute_retrieval_confidence(
     papers: List[PaperMetadata],
     *,
     use_local: bool,
+    query_quality_score: float = 1.0,
+    risk_level: str = "LOW",
+    has_inferred_disease: bool = True,
 ) -> float:
     if not chunks:
         return 0.0
@@ -39,6 +42,16 @@ def compute_retrieval_confidence(
     avg_top3 = sum(top3) / len(top3)
 
     base = _calibrate_raw_score(top, use_local) * 0.6 + _calibrate_raw_score(avg_top3, use_local) * 0.4
+    
+    # Penalties for poor query or high risk
+    if query_quality_score < 1.0:
+        base *= max(0.4, query_quality_score)
+        
+    if not has_inferred_disease and top < 0.6:
+        base *= 0.85
+        
+    if risk_level == "HIGH":
+        base *= 0.5
 
     # Boost when PubMed returned a solid set of papers
     paper_bonus = min(0.12, len(papers) * 0.008)
@@ -59,6 +72,6 @@ def retrieval_is_sufficient(
         return False
     if len(papers) >= min_papers and len(chunks) >= 1:
         top = max(c.score for c in chunks)
-        floor = 0.06 if use_local else 0.18
+        floor = 0.12 if use_local else 0.35
         return top >= floor
     return False

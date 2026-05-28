@@ -3,7 +3,7 @@ import logging
 import re
 from typing import List, Tuple
 
-from langchain_groq import ChatGroq
+from langchain_mistralai import ChatMistralAI
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.config import get_settings
@@ -113,11 +113,11 @@ def _build_answer_from_parsed(parsed: dict) -> str:
 class MedicalLLM:
     def __init__(self) -> None:
         settings = get_settings()
-        if not settings.groq_api_key:
-            raise ValueError("GROQ_API_KEY is not configured")
-        self._llm = ChatGroq(
-            model=settings.groq_model,
-            api_key=settings.groq_api_key,
+        if not settings.mistral_api_key:
+            raise ValueError("MISTRAL_API_KEY is not configured")
+        self._llm = ChatMistralAI(
+            model=settings.mistral_model,
+            api_key=settings.mistral_api_key,
             temperature=0.1,
             max_tokens=900,
         )

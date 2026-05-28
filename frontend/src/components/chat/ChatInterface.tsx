@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, Send, Stethoscope, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { ThemeToggle } from "@/components/theme-toggle";
 import { ResponseCard } from "@/components/chat/ResponseCard";
 import { checkHealth, queryMedicalResearch, type QueryResponse } from "@/lib/api";
 
@@ -119,6 +120,7 @@ export function ChatInterface() {
             >
               <Trash2 className="h-4 w-4 text-muted-foreground" />
             </Button>
+            <ThemeToggle />
             <span
               className={`rounded-full px-2.5 py-1 text-xs font-medium ${
                 apiStatus === "online"

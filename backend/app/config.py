@@ -16,12 +16,9 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    openai_api_key: str = ""
-    openai_model: str = "gpt-4o-mini"
-    openai_embedding_model: str = "text-embedding-3-small"
-
-    groq_api_key: str = ""
-    groq_model: str = "llama-3.3-70b-versatile"
+    # Mistral AI (embeddings and generation)
+    mistral_api_key: str = ""
+    mistral_model: str = "mistral-large-latest"
 
     pubmed_max_results: int = 15
     pubmed_retrieval_top_k: int = 8
@@ -37,9 +34,6 @@ class Settings(BaseSettings):
 
     block_emergency_keywords: bool = True
     min_confidence_threshold: float = 0.4
-
-    # Use TF-IDF instead of OpenAI embeddings (no API cost; lower semantic quality)
-    use_local_embeddings: bool = False
 
     @property
     def cors_origin_list(self) -> List[str]:

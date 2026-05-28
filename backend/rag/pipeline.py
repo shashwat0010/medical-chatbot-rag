@@ -1,8 +1,8 @@
 import logging
+import re
 from typing import List, Optional
 
-from groq import RateLimitError as GroqRateLimitError
-from openai import RateLimitError as OpenAIRateLimitError
+import httpx
 
 from app.config import get_settings
 from models.schemas import Citation, QueryResponse
@@ -14,6 +14,10 @@ from services.embeddings import EmbeddingServiceError, OpenAIQuotaError
 from rag.formatting import paragraph_to_bullets
 from services.guardrails import validate_answer_grounding, is_greeting_or_meta
 from services.pubmed import prioritize_trusted_journals, search_pubmed
+from rag.query_preprocessor import normalize_query, expand_query
+from rag.response_generator import generate_response
+from rag.query_quality import assess_query_quality
+from services.reranker import RerankerService
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +25,7 @@ logger = logging.getLogger(__name__)
 class RAGPipeline:
     def __init__(self) -> None:
         self._vector_store = FAISSVectorStore()
+        self._reranker = RerankerService()
         self._llm: Optional[MedicalLLM] = None
 
     def _get_llm(self) -> MedicalLLM:
@@ -28,28 +33,57 @@ class RAGPipeline:
             self._llm = MedicalLLM()
         return self._llm
 
-    async def run(self, query: str, max_papers: Optional[int] = None) -> QueryResponse:
+    async def run(self, query: str, max_papers: Optional[int] = None, risk_level: str = "LOW") -> QueryResponse:
         settings = get_settings()
+
+        is_valid, reason, q_score, ignored_tokens = assess_query_quality(query)
+        logger.info("Query quality score: %.2f (Ignored tokens: %s)", q_score, ignored_tokens)
+        logger.info("Assessed risk level: %s", risk_level)
+        
+        if not is_valid and not is_greeting_or_meta(query):
+            return generate_response(
+                answer=reason,
+                citations=[],
+                confidence_score=0.0,
+                insufficient_evidence=False,
+                confidence_note="Clarification required.",
+                sources_searched=[],
+            )
+            
+        # Clean query
+        for token in ignored_tokens:
+            query = re.sub(r'\b' + re.escape(token) + r'\b', '', query, flags=re.IGNORECASE).strip()
+        query = re.sub(r'\s+', ' ', query).strip()
 
         # Handle greetings/meta queries early to skip PubMed search
         if is_greeting_or_meta(query):
             answer, cited_indices, _ = await self._get_llm().generate(query, [])
-            return QueryResponse(
+            return generate_response(
                 answer=answer,
                 citations=[],
-                confidence_note="Assistant information.",
                 confidence_score=1.0,
                 insufficient_evidence=False,
+                confidence_note="Assistant information.",
                 sources_searched=[],
             )
 
-        use_local = settings.use_local_embeddings
+        # 1. Preprocess: Normalize terms and expand with synonyms & Boolean operators
+        expanded_query, inferred_diseases = expand_query(query)
+        normalized_query = normalize_query(query)
+        
+        logger.info("Raw query: %s", query)
+        logger.info("Normalized query: %s", normalized_query)
+        if inferred_diseases:
+            logger.info("Inferred diseases: %s", ", ".join(inferred_diseases))
+        logger.info("Expanded PubMed query: %s", expanded_query)
 
-        papers = await search_pubmed(query, max_results=max_papers)
+        # 2. Search PubMed using the high-quality Boolean expanded query
+        papers = await search_pubmed(expanded_query, max_results=max_papers)
         papers = prioritize_trusted_journals(papers)
 
+        # 3. Handle zero search results fallback
         if not papers:
-            return QueryResponse(
+            return generate_response(
                 answer="Current evidence is insufficient to provide a reliable answer.",
                 citations=[],
                 confidence_note=(
@@ -61,28 +95,58 @@ class RAGPipeline:
                 sources_searched=["PubMed"],
             )
 
+        # 4. Semantic hybrid search and Reranking
         try:
             await self._vector_store.build_from_papers(papers)
-            chunks = await self._vector_store.search(
-                query, top_k=settings.pubmed_retrieval_top_k
+            # Fetch top 20 candidates from hybrid search
+            hybrid_chunks = await self._vector_store.search(
+                normalized_query, top_k=20
             )
+            
+            # Apply Cross-Encoder Reranker
+            if hybrid_chunks:
+                logger.info("Reranking %d candidate chunks", len(hybrid_chunks))
+                texts = [c.text for c in hybrid_chunks]
+                rerank_scores = self._reranker.rerank(normalized_query, texts)
+                
+                # Overwrite RRF/FAISS scores with high-quality cross-encoder sigmoid scores
+                for chunk, r_score in zip(hybrid_chunks, rerank_scores):
+                    chunk.score = float(r_score)
+                    
+                hybrid_chunks.sort(key=lambda c: c.score, reverse=True)
+                
+            chunks = hybrid_chunks[:settings.pubmed_retrieval_top_k]
+            
         except (OpenAIQuotaError, EmbeddingServiceError) as exc:
             logger.error("Embedding failed: %s", exc)
             raise
 
-        # Always use the best-matching chunks (do not over-filter TF-IDF scores)
+        # Always use the best-matching chunks (do not over-filter TF-IDF/dense scores)
         evidence_chunks = chunks[: max(settings.min_evidence_chunks, 5)]
+        has_disease = len(inferred_diseases) > 0
         confidence_score = compute_retrieval_confidence(
-            chunks, papers, use_local=use_local
+            chunks, papers, use_local=False,
+            query_quality_score=q_score,
+            risk_level=risk_level,
+            has_inferred_disease=has_disease
         )
 
-        if not retrieval_is_sufficient(chunks, papers, use_local=use_local):
+        for chunk in chunks:
+            logger.debug("Chunk %d (PMID: %s) score: %.3f", chunk.chunk_index, chunk.paper.pmid, chunk.score)
+            
+        evidence_pmids = set(c.paper.pmid for c in evidence_chunks)
+        discarded_papers = set(p.pmid for p in papers) - evidence_pmids
+        if discarded_papers:
+            logger.debug("Discarded %d citations with low semantic relevance: %s", len(discarded_papers), discarded_papers)
+
+        # 5. Handle low-confidence / insufficient semantic match fallback
+        if not retrieval_is_sufficient(chunks, papers, use_local=False):
             logger.info(
                 "Weak retrieval: top_score=%.3f papers=%d",
                 max((c.score for c in chunks), default=0),
                 len(papers),
             )
-            return QueryResponse(
+            return generate_response(
                 answer="Current evidence is insufficient to provide a reliable answer.",
                 citations=self._chunks_to_citations(evidence_chunks[:3]),
                 confidence_note=(
@@ -94,14 +158,15 @@ class RAGPipeline:
                 sources_searched=["PubMed"],
             )
 
+        # 6. Generate the grounded answer from candidate chunks
         try:
             answer, cited_indices, llm_insufficient = await self._get_llm().generate(
-                query, evidence_chunks
+                normalized_query, evidence_chunks
             )
-        except (OpenAIRateLimitError, GroqRateLimitError) as exc:
-            if "quota" in str(exc).lower() or "insufficient_quota" in str(exc).lower():
-                logger.warning("LLM quota exceeded; using extractive fallback")
-                answer, cited_indices = build_extractive_answer(query, evidence_chunks)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 429:
+                logger.warning("LLM quota or rate limit exceeded; using extractive fallback")
+                answer, cited_indices = build_extractive_answer(normalized_query, evidence_chunks)
                 llm_insufficient = False
             else:
                 raise
@@ -121,7 +186,11 @@ class RAGPipeline:
             confidence_score,
         )
 
-        return QueryResponse(
+        if risk_level == "HIGH":
+            confidence_note = "High-risk query detected. Confidence strictly reduced. " + confidence_note
+
+        # 7. Package and label the response via response_generator
+        response = generate_response(
             answer=final_answer,
             citations=citations,
             confidence_note=confidence_note,
@@ -129,6 +198,11 @@ class RAGPipeline:
             insufficient_evidence=insufficient,
             sources_searched=["PubMed (BMJ, Nature, Lancet, and peer-reviewed literature)"],
         )
+        
+        if risk_level == "HIGH":
+            response.answer += "\n\n**Important Safety Notice:** Current evidence does not support replacing evidence-based treatment with unverified alternatives. Supportive approaches may help symptom management, but treatment decisions should be made with a licensed clinician or specialist."
+            
+        return response
 
     def _resolve_citations(
         self, chunks: List[RetrievedChunk], indices: List[int]

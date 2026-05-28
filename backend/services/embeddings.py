@@ -1,13 +1,15 @@
 import logging
 from typing import List
 
-from langchain_openai import OpenAIEmbeddings
-from openai import APIConnectionError, AuthenticationError, RateLimitError
+import httpx
 
 from app.config import get_settings
-from services.local_embeddings import fit_tfidf, tfidf_embed, transform_tfidf
 
 logger = logging.getLogger(__name__)
+
+MISTRAL_EMBED_URL = "https://api.mistral.ai/v1/embeddings"
+MISTRAL_EMBED_MODEL = "mistral-embed"
+HF_TIMEOUT = 30.0
 
 
 class EmbeddingServiceError(Exception):
@@ -15,63 +17,73 @@ class EmbeddingServiceError(Exception):
 
 
 class OpenAIQuotaError(EmbeddingServiceError):
-    pass
+    """Kept for backward compatibility with pipeline error handling."""
 
 
-def get_embedding_model() -> OpenAIEmbeddings:
+async def _mistral_embed(texts: List[str]) -> List[List[float]]:
+    """
+    Call Mistral AI Embeddings API (free tier).
+    Model: mistral-embed (1024-dim, high quality, OpenAI-compatible endpoint).
+    Get a free key at: https://console.mistral.ai/
+    """
     settings = get_settings()
-    if not settings.openai_api_key:
-        raise ValueError("OPENAI_API_KEY is not configured")
-    return OpenAIEmbeddings(
-        model=settings.openai_embedding_model,
-        api_key=settings.openai_api_key,
-    )
+    if not settings.mistral_api_key or settings.mistral_api_key == "your_mistral_key_here":
+        raise EmbeddingServiceError(
+            "Mistral API key is not configured. "
+            "Get a free key at https://console.mistral.ai/ "
+            "and set MISTRAL_API_KEY in backend/.env"
+        )
+
+    headers = {
+        "Authorization": f"Bearer {settings.mistral_api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": MISTRAL_EMBED_MODEL,
+        "input": texts,
+    }
+
+    async with httpx.AsyncClient(timeout=HF_TIMEOUT) as client:
+        try:
+            response = await client.post(MISTRAL_EMBED_URL, headers=headers, json=payload)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            if status == 401:
+                raise EmbeddingServiceError(
+                    "Invalid Mistral API key. Check MISTRAL_API_KEY in backend/.env"
+                ) from exc
+            if status == 429:
+                raise EmbeddingServiceError(
+                    "Mistral API rate limit hit. Please wait a moment and retry."
+                ) from exc
+            raise EmbeddingServiceError(
+                f"Mistral Embeddings API error ({status}): {exc.response.text[:200]}"
+            ) from exc
+        except httpx.TimeoutException as exc:
+            raise EmbeddingServiceError(
+                "Mistral Embeddings API timed out. Try again."
+            ) from exc
+        except httpx.RequestError as exc:
+            raise EmbeddingServiceError(
+                f"Cannot reach Mistral Embeddings API: {exc}"
+            ) from exc
+
+    data = response.json()
+    # Mistral returns {"data": [{"embedding": [...], "index": 0}, ...]}
+    embeddings = [item["embedding"] for item in sorted(data["data"], key=lambda x: x["index"])]
+    logger.info("Got %d embeddings from Mistral (dim=%d)", len(embeddings), len(embeddings[0]) if embeddings else 0)
+    return embeddings
 
 
 async def embed_texts(texts: List[str], *, allow_local_fallback: bool = True) -> List[List[float]]:
+    """Embed a batch of document texts using Mistral AI Embeddings API (free)."""
     if not texts:
         return []
-
-    settings = get_settings()
-    if settings.use_local_embeddings:
-        logger.info("Using local TF-IDF embeddings (USE_LOCAL_EMBEDDINGS=true)")
-        return fit_tfidf(texts)
-
-    try:
-        model = get_embedding_model()
-        return await model.aembed_documents(texts)
-    except RateLimitError as exc:
-        err_text = str(exc).lower()
-        if "insufficient_quota" in err_text or "quota" in err_text:
-            logger.error("OpenAI embedding quota exceeded")
-            if allow_local_fallback:
-                logger.warning("Falling back to local TF-IDF embeddings")
-                return fit_tfidf(texts)
-            raise OpenAIQuotaError(
-                "OpenAI API quota exceeded. Add billing at https://platform.openai.com/account/billing "
-                "or set USE_LOCAL_EMBEDDINGS=true in backend/.env"
-            ) from exc
-        raise EmbeddingServiceError(f"OpenAI rate limit: {exc}") from exc
-    except AuthenticationError as exc:
-        raise EmbeddingServiceError(
-            "Invalid OpenAI API key. Check OPENAI_API_KEY in backend/.env"
-        ) from exc
-    except APIConnectionError as exc:
-        if allow_local_fallback:
-            logger.warning("OpenAI unreachable; using local TF-IDF embeddings: %s", exc)
-            return fit_tfidf(texts)
-        raise EmbeddingServiceError(f"Cannot reach OpenAI API: {exc}") from exc
+    logger.info("Embedding %d texts via Mistral AI", len(texts))
+    return await _mistral_embed(texts)
 
 
 async def embed_query(text: str) -> List[List[float]]:
-    """Embed a query using the same vocabulary as the last fit_tfidf / document batch."""
-    settings = get_settings()
-    if settings.use_local_embeddings:
-        return transform_tfidf([text])
-    try:
-        model = get_embedding_model()
-        return await model.aembed_documents([text])
-    except RateLimitError:
-        return transform_tfidf([text])
-    except APIConnectionError:
-        return transform_tfidf([text])
+    """Embed a single query string using Mistral AI Embeddings API."""
+    return await _mistral_embed([text])

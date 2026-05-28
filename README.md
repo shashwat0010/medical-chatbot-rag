@@ -9,14 +9,17 @@ An AI-powered medical research assistant designed for clinicians and researchers
 ## 🚀 Key Features
 
 - **Live PubMed Integration:** Fetches the latest peer-reviewed abstracts directly from the National Library of Medicine.
-- **Semantic Search:** Uses FAISS and advanced embeddings to find the most relevant evidence chunks within retrieved papers.
-- **RAG Pipeline:** Generates structured answers using **Groq (Llama 3)** or **OpenAI (GPT-4o)** with direct citations.
-- **Medical Safety Guardrails:** Built-in checks for emergency keywords and clinical confidence thresholds.
+- **Hybrid Retrieval:** Combines FAISS semantic search and BM25 sparse keyword search for robust evidence gathering.
+- **Reranking Layer:** Uses a local Cross-Encoder (`ms-marco-MiniLM-L-6-v2`) to accurately rerank retrieved papers.
+- **RAG Pipeline:** Generates structured answers using **Mistral AI** (`mistral-large-latest`) with direct citations.
+- **Medical Safety Guardrails:** Built-in checks for emergency keywords, query quality validation, and clinical confidence thresholds.
 - **Modern UI:** Responsive dashboard built with Next.js, Tailwind CSS, and Shadcn UI.
 
 ---
 
 ## 🏗️ Architecture
+
+![Architecture Diagram]()
 
 The system follows a modular RAG architecture to ensure data freshness and clinical relevance:
 
@@ -32,13 +35,14 @@ flowchart TD
     end
     
     subgraph "Processing Stage"
-        Chunker --> Embeddings[FAISS Vector Store]
-        Embeddings --> Search[Semantic Similarity Search]
+        Chunker --> Embeddings[Mistral Embeddings]
+        Embeddings --> Hybrid[FAISS + BM25 Hybrid Search]
+        Hybrid --> Reranker[Cross-Encoder Reranking]
     end
     
     subgraph "Generation Stage"
-        Search --> Prompt[Context-Rich Prompt]
-        Prompt --> LLM[Groq / OpenAI LLM]
+        Reranker --> Prompt[Context-Rich Prompt]
+        Prompt --> LLM[Mistral LLM]
         LLM --> Response[Answer + Citations]
     end
     
@@ -70,7 +74,7 @@ jubilant_ai/
 ### Prerequisites
 - Python 3.11+
 - Node.js 20+
-- API Keys: [Groq Cloud](https://console.groq.com/) and/or [OpenAI](https://platform.openai.com/)
+- API Keys: [Mistral AI](https://console.mistral.ai/)
 
 ### 1. Backend Setup
 ```bash
@@ -85,7 +89,7 @@ pip install -r requirements.txt
 
 # Configure Environment
 cp .env.example .env
-# Edit .env and set your GROQ_API_KEY and OPENAI_API_KEY
+# Edit .env and set your MISTRAL_API_KEY
 ```
 
 **Run Backend:**
@@ -127,7 +131,6 @@ Try these queries to see the assistant in action:
 
 - **Confidence Scoring:** Every response includes a confidence score based on the relevance of the retrieved evidence.
 - **Source Citations:** Answers are grounded in specific PubMed IDs (PMIDs) with direct links to the original papers.
-- **Local Fallback:** Support for local TF-IDF embeddings to reduce API costs and improve privacy.
 
 ---
 

@@ -53,6 +53,13 @@ _STOP_WORDS = {
 def _simplify_query_for_pubmed(query: str) -> str:
     """Turn natural-language questions into PubMed-friendly search terms."""
     q = query.strip().rstrip("?.!")
+    
+    # Preserve Boolean queries with uppercase AND/OR or parenthesis
+    words = q.split()
+    if len(words) > 1:
+        if any(w in ("AND", "OR") for w in words) or "(" in q or ")" in q:
+            return q
+
     q = _QUESTION_PREFIX.sub("", q)
     # Drop filler phrases common in clinical questions
     for phrase in (

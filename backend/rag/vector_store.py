@@ -4,6 +4,7 @@ from typing import List, Optional, Tuple
 
 import faiss
 import numpy as np
+import psutil
 from rank_bm25 import BM25Okapi
 
 from models.schemas import PaperMetadata
@@ -66,6 +67,9 @@ class FAISSVectorStore:
             self._bm25 = None
             return
 
+        mem_before = psutil.virtual_memory().used / (1024 * 1024)
+        logger.info("Building BM25 and FAISS indices. RAM before: %.1f MB", mem_before)
+
         # 1. Build BM25 Index
         tokenized_texts = [text.lower().split() for text in texts]
         self._bm25 = BM25Okapi(tokenized_texts)
@@ -78,7 +82,8 @@ class FAISSVectorStore:
         self._dimension = vectors.shape[1]
         self._index = faiss.IndexFlatIP(self._dimension)
         self._index.add(vectors)
-        logger.info("Built FAISS index with %d chunks from %d papers", len(texts), len(papers))
+        mem_after = psutil.virtual_memory().used / (1024 * 1024)
+        logger.info("Built FAISS index with %d chunks. RAM after: %.1f MB (Delta: %.1f MB)", len(texts), mem_after, mem_after - mem_before)
 
     async def search(self, query: str, top_k: int = 8) -> List[RetrievedChunk]:
         if not self.is_ready or self._index is None or self._bm25 is None:

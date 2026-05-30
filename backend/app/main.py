@@ -10,6 +10,11 @@ from app.config import get_settings
 from app.limiter import limiter
 from app.logging_config import setup_logging
 from app.routes import health, query, search
+from services.reranker import get_reranker
+import psutil
+import logging
+
+logger = logging.getLogger(__name__)
 
 setup_logging()
 # Force uvicorn reload to load updated environment settings
@@ -18,6 +23,15 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    logger.info("Initializing application lifespan...")
+    mem_before = psutil.virtual_memory().used / (1024 * 1024)
+    logger.info("Base RAM before model loading: %.1f MB", mem_before)
+    
+    # Preload the reranker CrossEncoder into memory
+    get_reranker().load_model()
+    
+    mem_after = psutil.virtual_memory().used / (1024 * 1024)
+    logger.info("Startup complete. Total RAM usage: %.1f MB", mem_after)
     yield
 
 

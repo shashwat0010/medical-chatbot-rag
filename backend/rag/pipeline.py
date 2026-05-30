@@ -3,6 +3,7 @@ import re
 from typing import List, Optional
 
 import httpx
+from cachetools import LRUCache
 
 from app.config import get_settings
 from models.schemas import Citation, QueryResponse
@@ -17,15 +18,15 @@ from services.pubmed import prioritize_trusted_journals, search_pubmed
 from rag.query_preprocessor import normalize_query, expand_query
 from rag.response_generator import generate_response
 from rag.query_quality import assess_query_quality
-from services.reranker import RerankerService
+from services.reranker import get_reranker
 
 logger = logging.getLogger(__name__)
 
+# Cache the last 5 FAISS indices to prevent massive memory spikes and CPU usage on repeated queries
+_vector_store_cache = LRUCache(maxsize=5)
 
 class RAGPipeline:
     def __init__(self) -> None:
-        self._vector_store = FAISSVectorStore()
-        self._reranker = RerankerService()
         self._llm: Optional[MedicalLLM] = None
 
     def _get_llm(self) -> MedicalLLM:
@@ -97,9 +98,16 @@ class RAGPipeline:
 
         # 4. Semantic hybrid search and Reranking
         try:
-            await self._vector_store.build_from_papers(papers)
+            vector_store = _vector_store_cache.get(expanded_query)
+            if vector_store is None:
+                vector_store = FAISSVectorStore()
+                await vector_store.build_from_papers(papers)
+                _vector_store_cache[expanded_query] = vector_store
+            else:
+                logger.info("Using cached FAISS index for query: %s", expanded_query)
+
             # Fetch top 20 candidates from hybrid search
-            hybrid_chunks = await self._vector_store.search(
+            hybrid_chunks = await vector_store.search(
                 normalized_query, top_k=20
             )
             
@@ -107,13 +115,16 @@ class RAGPipeline:
             if hybrid_chunks:
                 logger.info("Reranking %d candidate chunks", len(hybrid_chunks))
                 texts = [c.text for c in hybrid_chunks]
-                rerank_scores = self._reranker.rerank(normalized_query, texts)
+                reranker = get_reranker()
+                rerank_scores = reranker.safe_rerank(normalized_query, texts)
                 
-                # Overwrite RRF/FAISS scores with high-quality cross-encoder sigmoid scores
-                for chunk, r_score in zip(hybrid_chunks, rerank_scores):
-                    chunk.score = float(r_score)
-                    
-                hybrid_chunks.sort(key=lambda c: c.score, reverse=True)
+                if rerank_scores:
+                    # Overwrite RRF/FAISS scores with high-quality cross-encoder sigmoid scores
+                    for chunk, r_score in zip(hybrid_chunks, rerank_scores):
+                        chunk.score = float(r_score)
+                    hybrid_chunks.sort(key=lambda c: c.score, reverse=True)
+                else:
+                    logger.warning("Skipped reranking due to high memory. Falling back to FAISS/BM25 scores.")
                 
             chunks = hybrid_chunks[:settings.pubmed_retrieval_top_k]
             

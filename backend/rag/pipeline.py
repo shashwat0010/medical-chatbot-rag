@@ -18,7 +18,6 @@ from services.pubmed import prioritize_trusted_journals, search_pubmed
 from rag.query_preprocessor import normalize_query, expand_query
 from rag.response_generator import generate_response
 from rag.query_quality import assess_query_quality
-from services.reranker import get_reranker
 
 logger = logging.getLogger(__name__)
 
@@ -106,26 +105,12 @@ class RAGPipeline:
             else:
                 logger.info("Using cached FAISS index for query: %s", expanded_query)
 
-            # Fetch top 20 candidates from hybrid search
+            # Fetch top candidates from hybrid search (FAISS Cosine + BM25 RRF)
             hybrid_chunks = await vector_store.search(
                 normalized_query, top_k=20
             )
             
-            # Apply Cross-Encoder Reranker
-            if hybrid_chunks:
-                logger.info("Reranking %d candidate chunks", len(hybrid_chunks))
-                texts = [c.text for c in hybrid_chunks]
-                reranker = get_reranker()
-                rerank_scores = reranker.safe_rerank(normalized_query, texts)
-                
-                if rerank_scores:
-                    # Overwrite RRF/FAISS scores with high-quality cross-encoder sigmoid scores
-                    for chunk, r_score in zip(hybrid_chunks, rerank_scores):
-                        chunk.score = float(r_score)
-                    hybrid_chunks.sort(key=lambda c: c.score, reverse=True)
-                else:
-                    logger.warning("Skipped reranking due to high memory. Falling back to FAISS/BM25 scores.")
-                
+            # Since reranker is removed, we just rely on the baseline semantic scores
             chunks = hybrid_chunks[:settings.pubmed_retrieval_top_k]
             
         except (OpenAIQuotaError, EmbeddingServiceError) as exc:

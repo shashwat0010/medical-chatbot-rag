@@ -4,13 +4,15 @@ An AI-powered medical research assistant designed for clinicians and researchers
 
 > **⚠️ Disclaimer:** This tool is for research support only. It is not intended for emergency care, clinical diagnosis, or personal treatment decisions.
 
+**Live Demo:** [https://medi-chat-an1i.vercel.app/](https://medi-chat-an1i.vercel.app/)
+
 ---
 
 ## 🚀 Key Features
 
 - **Live PubMed Integration:** Fetches the latest peer-reviewed abstracts directly from the National Library of Medicine.
-- **Hybrid Retrieval:** Combines FAISS semantic search and BM25 sparse keyword search for robust evidence gathering.
-- **Reranking Layer:** Uses a local Cross-Encoder (`ms-marco-MiniLM-L-6-v2`) to accurately rerank retrieved papers.
+- **Hybrid Retrieval:** Combines FAISS semantic search (cosine similarity via Mistral embeddings) and BM25 sparse keyword search for robust evidence gathering.
+- **Memory Optimized (Render-Ready):** Employs Reciprocal Rank Fusion (RRF) for fast, accurate ranking without heavy local neural networks, ensuring <512MB RAM usage.
 - **RAG Pipeline:** Generates structured answers using **Mistral AI** (`mistral-large-latest`) with direct citations.
 - **Medical Safety Guardrails:** Built-in checks for emergency keywords, query quality validation, and clinical confidence thresholds.
 - **Modern UI:** Responsive dashboard built with Next.js, Tailwind CSS, and Shadcn UI.
@@ -37,11 +39,11 @@ flowchart TD
     subgraph "Processing Stage"
         Chunker --> Embeddings[Mistral Embeddings]
         Embeddings --> Hybrid[FAISS + BM25 Hybrid Search]
-        Hybrid --> Reranker[Cross-Encoder Reranking]
+        Hybrid --> RRF[Reciprocal Rank Fusion]
     end
     
     subgraph "Generation Stage"
-        Reranker --> Prompt[Context-Rich Prompt]
+        RRF --> Prompt[Context-Rich Prompt]
         Prompt --> LLM[Mistral LLM]
         LLM --> Response[Answer + Citations]
     end
